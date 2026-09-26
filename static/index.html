@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contract Intelligence</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel-2:#1d212a; --line:#2a2f3a;
+    --ink:#e6e9ef; --muted:#9aa3b2; --accent:#5b9dff; --good:#3fbf7f; --bad:#e2574c;
+    --warn:#e0a33e; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 20px 64px}
+  header{border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:22px}
+  h1{margin:0 0 6px;font-size:21px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:13.5px;max-width:74ch}
+  .meta{margin-top:10px;font:12px var(--mono);color:var(--muted)}
+  .askbar{display:flex;gap:10px;margin:20px 0 14px}
+  input[type=text]{flex:1;background:var(--panel);border:1px solid var(--line);
+    color:var(--ink);padding:12px 14px;border-radius:8px;font-size:14.5px}
+  input[type=text]:focus{outline:none;border-color:var(--accent)}
+  button{background:var(--accent);color:#08101f;border:0;padding:12px 20px;
+    border-radius:8px;font-weight:650;cursor:pointer;font-size:14px}
+  button:disabled{opacity:.5;cursor:default}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:22px}
+  .chip{background:var(--panel);border:1px solid var(--line);color:var(--muted);
+    padding:6px 11px;border-radius:999px;font-size:12.5px;cursor:pointer}
+  .chip:hover{border-color:var(--accent);color:var(--ink)}
+  .chip b{color:var(--accent);font-weight:600}
+  .plan{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
+    padding:12px 14px;margin-bottom:16px;font:12.5px var(--mono);color:var(--muted)}
+  .plan span{color:var(--ink)}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:860px){.cols{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card h2{margin:0;padding:12px 15px;font-size:13px;letter-spacing:.04em;
+    text-transform:uppercase;border-bottom:1px solid var(--line);display:flex;
+    justify-content:space-between;align-items:center}
+  .routed h2{color:var(--good)} .naive h2{color:var(--bad)}
+  .badge{font:11px var(--mono);padding:3px 8px;border-radius:5px;text-transform:none;letter-spacing:0}
+  .b-ok{background:rgba(63,191,127,.15);color:var(--good)}
+  .b-no{background:rgba(226,87,76,.15);color:var(--bad)}
+  .body{padding:15px}
+  .val{font-size:27px;font-weight:680;margin-bottom:3px}
+  .val.small{font-size:16px;font-weight:600}
+  .vlabel{color:var(--muted);font-size:12px;margin-bottom:12px}
+  .exp{color:var(--muted);font-size:12.5px;border-left:2px solid var(--line);
+    padding-left:11px;margin-bottom:12px}
+  .items{max-height:230px;overflow:auto;border-top:1px solid var(--line);padding-top:10px}
+  .item{font:11.5px var(--mono);padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+  .item .cid{color:var(--accent)}
+  .item .rsn{color:var(--muted)}
+  .item .cite{color:#6d7687;display:block;margin-top:3px;font-size:10.5px}
+  .foot{display:flex;gap:14px;font:11px var(--mono);color:var(--muted);
+    border-top:1px solid var(--line);padding:9px 15px}
+  .err{background:rgba(226,87,76,.1);border:1px solid var(--bad);color:#ffb8b2;
+    padding:11px 14px;border-radius:8px;margin-bottom:16px;font-size:13px}
+  .why{background:rgba(91,157,255,.07);border:1px solid rgba(91,157,255,.25);
+    border-radius:8px;padding:11px 14px;margin-bottom:16px;font-size:13px;color:#bcd4ff}
+  .loading{color:var(--muted);font-size:13px;padding:8px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Contract Intelligence</h1>
+    <div class="sub">
+      Query routing over structured contract facts. Both systems answer the same question:
+      on the left, a router that dispatches to an engine capable of answering it; on the right,
+      a standard retrieve-then-read pipeline with hybrid search and clause-aware chunking.
+      The baseline is given perfect reading comprehension over whatever it retrieves, so every
+      gap you see is attributable to retrieval alone.
+    </div>
+    <div class="meta" id="meta">loading…</div>
+  </header>
+
+  <div class="askbar">
+    <input type="text" id="q" placeholder="Ask about the contract corpus…"
+           autocomplete="off" spellcheck="false">
+    <button id="go">Ask</button>
+  </div>
+
+  <div class="chips" id="chips"></div>
+  <div id="why"></div>
+  <div id="err"></div>
+  <div id="plan"></div>
+  <div id="out"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let EXAMPLES = [];
+
+async function boot() {
+  try {
+    const h = await (await fetch('/api/health')).json();
+    $('meta').textContent =
+      `${h.contracts} contracts · ${h.chunks} chunks · extractor=${h.extractor} · embeddings=${h.embedding_backend}`;
+    EXAMPLES = await (await fetch('/api/examples')).json();
+    $('chips').innerHTML = EXAMPLES
+      .map((e,i) => `<div class="chip" data-i="${i}"><b>${e.cat}</b> · ${esc(e.q)}</div>`).join('');
+    $('chips').querySelectorAll('.chip').forEach(c => c.onclick = () => {
+      const e = EXAMPLES[+c.dataset.i];
+      $('q').value = e.q;
+      $('why').innerHTML = `<div class="why"><b>${e.cat}</b> — ${esc(e.why)}</div>`;
+      ask();
+    });
+  } catch (e) { $('meta').textContent = 'backend unreachable'; }
+}
+
+function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function fmtVal(a) {
+  if (a.abstained) return ['abstained', 'the system declined to answer'];
+  const v = a.value;
+  if (v === null || v === undefined) return ['—', 'no value'];
+  if (Array.isArray(v)) return [String(v.length), v.length === 1 ? 'contract' : 'contracts'];
+  return [String(v), 'result'];
+}
+
+function card(a, kind) {
+  if (!a) return '';
+  const [val, label] = fmtVal(a);
+  const complete = a.complete
+    ? '<span class="badge b-ok">complete scan</span>'
+    : '<span class="badge b-no">partial sample</span>';
+  const items = (a.items || []).slice(0, 40).map(i => `
+    <div class="item">
+      <span class="cid">${esc(i.contract_id)}</span> <span class="rsn">${esc(i.reason)}</span>
+      ${i.citation ? `<span class="cite">“${esc((i.citation.snippet||'').slice(0,150))}…” [${i.citation.start}:${i.citation.end}]</span>` : ''}
+    </div>`).join('');
+  const title = kind === 'routed' ? 'Routed system' : 'Naive RAG baseline';
+  return `
+    <div class="card ${kind === 'routed' ? 'routed' : 'naive'}">
+      <h2>${title} ${complete}</h2>
+      <div class="body">
+        <div class="val ${val.length > 6 ? 'small' : ''}">${esc(val)}</div>
+        <div class="vlabel">${esc(label)}</div>
+        <div class="exp">${esc(a.explanation)}</div>
+        ${items ? `<div class="items">${items}</div>` : ''}
+      </div>
+      <div class="foot">
+        <span>engine: ${esc(a.engine)}</span>
+        <span>scanned: ${a.scanned}</span>
+        <span>${a.latency_ms} ms</span>
+      </div>
+    </div>`;
+}
+
+async function ask() {
+  const query = $('q').value.trim();
+  if (!query) return;
+  $('err').innerHTML = ''; $('go').disabled = true;
+  $('out').innerHTML = '<div class="loading">running both systems…</div>';
+  try {
+    const r = await fetch('/api/ask', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ query, compare: true })
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const d = await r.json();
+    const p = d.plan;
+    $('plan').innerHTML = `<div class="plan">
+      routed as <span>${esc(p.query_type)}</span>
+      · field <span>${esc(p.field ?? '—')}</span>
+      · operator <span>${esc(p.operator ?? '—')}</span>
+      · value <span>${esc(JSON.stringify(p.value) ?? '—')}</span><br>
+      signals: ${esc((p.signals||[]).join('  |  '))}
+    </div>`;
+    $('out').innerHTML = `<div class="cols">${card(d.routed,'routed')}${card(d.baseline,'naive')}</div>`;
+  } catch (e) {
+    $('out').innerHTML = '';
+    $('err').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  } finally { $('go').disabled = false; }
+}
+
+$('go').onclick = ask;
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
+boot();
+</script>
+</body>
+</html>
