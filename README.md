@@ -21,6 +21,10 @@ The semantic row is the control, and it is supposed to be a tie. Both systems ro
 
 Complete answers: **21/24 routed, 0/24 baseline.** Latency p50 1.64 ms, p95 3.03 ms.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SaiKiran6305/rag-query-router)
+
+One click on Render using the checked-in `render.yaml`. `railway.json` and `fly.toml` are included too, and the Dockerfile binds `$PORT` so it runs unmodified on any of them. Nothing to configure: no API key, no model download, no external services.
+
 ---
 
 ## The problem
@@ -56,6 +60,10 @@ The router emits an inspectable plan — type, field, operator, value, and the l
 **The `complete` flag.** Every engine except `semantic` sets `complete=True`, because every engine except `semantic` examined the full corpus. This single field is the honest difference between the two systems: a count taken over eight retrieved chunks is not a count, and nothing in a top k pipeline can tell the user so.
 
 ## Two design decisions worth explaining
+
+> Fuller rationale for the three non-obvious decisions in this codebase — including
+> the wrong version of each, which looks more reasonable than the right one — is in
+> [DESIGN_NOTES.md](DESIGN_NOTES.md).
 
 **Absence is genuinely ambiguous, and the system says so.** A null value can mean the clause is truly absent, or that extraction missed it. Treating those as identical would be exactly the overconfidence this project argues against. So fields carry a companion *basis* column recording why a value is absent (`omitted`, `explicit_unlimited`, `unparsed`), and the absence engine gates on **determinacy** — the fraction of rows where the answer is settled — rather than on raw value coverage. Below an 80% floor it abstains and explains why. `test_absence_abstains_without_determinacy` removes the basis signal and asserts the abstention fires.
 
@@ -119,6 +127,7 @@ app/
 data/generate_corpus.py
 static/index.html     side by side comparison UI
 tests/test_system.py  correctness + characterisation
+DESIGN_NOTES.md       why three non-obvious decisions are what they are
 ```
 
 **References:** [Predictable Failure Modes of RAG Retrieval](https://towardsdatascience.com/embeddings-arent-magic-the-predictable-failure-modes-of-rag-retrieval-enterprise-document-intelligence-vol-1-2/) · [ContractEval (arXiv 2508.03080)](https://arxiv.org/abs/2508.03080) · [CUAD](https://www.atticusprojectai.org/cuad)
