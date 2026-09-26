@@ -1,0 +1,11 @@
+# Render Blueprint. Deploy from the repo with no further configuration:
+# https://render.com/deploy?repo=https://github.com/SaiKiran6305/rag-query-router
+services:
+  - type: web
+    name: rag-query-router
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    # Render injects PORT; the Dockerfile binds to it.
+    healthCheckPath: /api/health
+    autoDeploy: true
