@@ -21,9 +21,15 @@ The semantic row is the control, and it is supposed to be a tie. Both systems ro
 
 Complete answers: **21/24 routed, 0/24 baseline.** Latency p50 1.64 ms, p95 3.03 ms.
 
+### ▶ Live demo — **[rag-query-router.onrender.com](https://rag-query-router.onrender.com)**
+
+Ask it *"which contracts have no liability cap?"* and watch both systems answer side by side.
+
+> Hosted on a free tier that sleeps when idle, so the **first load takes 30–50 seconds** while the container wakes and rebuilds its index. Everything after that is single-digit milliseconds.
+
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SaiKiran6305/rag-query-router)
 
-One click on Render using the checked-in `render.yaml`. `railway.json` and `fly.toml` are included too, and the Dockerfile binds `$PORT` so it runs unmodified on any of them. Nothing to configure: no API key, no model download, no external services.
+Deploys in one click from the checked-in `render.yaml`. `railway.json` and `fly.toml` are included too, and the Dockerfile binds `$PORT` so it runs unmodified on any of them. Nothing to configure: no API key, no model download, no external services.
 
 ---
 
