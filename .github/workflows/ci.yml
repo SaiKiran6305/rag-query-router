@@ -1,0 +1,22 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - run: python data/generate_corpus.py --n 200 --seed 7
+      - run: python -m pytest tests/ -q
+
+      # Regression gate. The build fails if routing accuracy on the structural
+      # categories drops below 0.95 -- so a change that quietly degrades the
+      # engines cannot merge while the README still claims 1.000.
+      - name: eval gate
+        run: python -m app.eval.run_eval --corpus data/corpus --fail-under 0.95
+
+      - uses: actions/upload-artifact@v4
+        with: { name: eval-report, path: eval_report.json }
