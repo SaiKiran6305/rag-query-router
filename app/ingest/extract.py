@@ -32,6 +32,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from app.models import Citation, ExtractedContract, Fact
+from app.schema import FIELDS as SCHEMA_FIELDS, canonical_agreement_type
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -159,6 +160,13 @@ class Extractor(ABC):
         return out
 
 
+# A document whose clause structure the extractor cannot see gives it no right
+# to report a clause as *absent*. Every synthetic contract has 6+ numbered
+# headings in this form; 436 of CUAD's 510 real contracts have none.
+_HEADING = re.compile(r"^\s*\d+\.\s+[A-Z][A-Z \-]+\.", re.MULTILINE)
+MIN_HEADINGS_FOR_ABSENCE = 5
+
+
 class DeterministicExtractor(Extractor):
     """Pattern based. No API key, no model download, fully reproducible.
 
@@ -171,6 +179,14 @@ class DeterministicExtractor(Extractor):
 
     def extract(self, contract_id: str, text: str, source_path: str) -> ExtractedContract:
         c = ExtractedContract(contract_id=contract_id, source_path=source_path, text=text)
+
+        # Can we see this document's clause structure? If not, "no LIABILITY
+        # heading found" means "unknown", not "the contract has no cap" -- on
+        # CUAD the old behaviour marked 255 contracts with a liability clause as
+        # 'omitted', which the absence engine then reported as settled fact.
+        structured = len(_HEADING.findall(text)) >= MIN_HEADINGS_FOR_ABSENCE
+        absent_basis = "omitted" if structured else "unknown"
+        absent_flag = False if structured else None
 
         def put(name: str, value, citation: Citation | None, conf: float = 1.0) -> None:
             c.facts[name] = Fact(name=name, value=value, citation=citation, confidence=conf)
@@ -187,7 +203,9 @@ class DeterministicExtractor(Extractor):
             _cite(contract_id, m.group(0), m.start()) if m else None)
 
         m = re.search(r"^([A-Z][A-Z \-]+)\n", text)
-        put("agreement_type", m.group(1).strip().title() if m else None,
+        # Canonical name, not .title(): "STATEMENT OF WORK".title() is
+        # "Statement Of Work", which silently failed exact matches.
+        put("agreement_type", canonical_agreement_type(m.group(1)) if m else None,
             _cite(contract_id, m.group(0), m.start()) if m else None)
 
         # Multi-word states ("New York") need the repeated capitalised group.
@@ -251,7 +269,7 @@ class DeterministicExtractor(Extractor):
         liab = _find_section_by_heading(text, "LIMITATION OF LIABILITY") or _find_section_by_heading(text, "LIABILITY")
         if liab is None:
             put("liability_cap_usd", None, None)
-            put("liability_cap_basis", "omitted", None)
+            put("liability_cap_basis", absent_basis, None)
         else:
             sec_text, sec_start = liab
             low = sec_text.lower()
@@ -290,12 +308,12 @@ class DeterministicExtractor(Extractor):
             put("insurance_required", True, _cite(contract_id, sec_text, sec_start))
             put("insurance_min_usd", amt, _cite(contract_id, sec_text, sec_start))
         else:
-            put("insurance_required", False, None)
+            put("insurance_required", absent_flag, None)
             put("insurance_min_usd", None, None)
 
         # --- booleans and remaining scalars ---------------------------------
         indem = _find_section_by_heading(text, "INDEMNIFICATION")
-        put("indemnification", indem is not None,
+        put("indemnification", True if indem is not None else absent_flag,
             _cite(contract_id, indem[0], indem[1]) if indem else None)
 
         assign = _find_section_by_heading(text, "ASSIGNMENT")
@@ -320,7 +338,7 @@ class DeterministicExtractor(Extractor):
             put("confidentiality_basis", "present" if m_y else "unparsed", cit_c)
         else:
             put("confidentiality_years", None, None)
-            put("confidentiality_basis", "omitted", None)
+            put("confidentiality_basis", absent_basis, None)
 
         term_sec2 = _find_section_by_heading(text, "TERMINATION")
         if term_sec2:
@@ -349,14 +367,8 @@ class LLMExtractor(Extractor):
     """
     name = "llm"
 
-    FIELDS = [
-        "vendor", "agreement_type", "governing_law", "effective_date", "expiry_date",
-        "term_months", "auto_renew", "renewal_notice_days", "liability_cap_usd",
-        "liability_cap_basis", "late_penalty_usd", "termination_notice_days",
-        "insurance_required", "insurance_min_usd", "indemnification",
-        "assignment_allowed", "confidentiality_years", "confidentiality_basis",
-        "amends_contract_id",
-    ]
+    # Derived from the schema registry so the prompt can never drift from the table.
+    FIELDS = [f.name for f in SCHEMA_FIELDS]
 
     def __init__(self, model: str = "gpt-4o-mini", api_key: str | None = None):
         self.model = model

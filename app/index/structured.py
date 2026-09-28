@@ -4,13 +4,20 @@ Structured fact store: SQLite over extracted facts, with citations preserved.
 This is the layer that makes Group B queries answerable. Counting, absence
 detection and magnitude comparison are ordinary SQL once the facts are typed
 and complete. The engineering that matters happened upstream in extraction --
-here it is just a table.
+here it is a table plus a small, safe query compiler.
 
-Two properties the engines depend on:
+Three properties the engines depend on:
 
-  scan_all()    returns every row, so an aggregate is computed over the corpus
-                rather than over a retrieved sample. The Answer.complete flag
-                is only ever set True by a path that went through here.
+  select()      compiles a plan's predicates to a *parameterized* WHERE clause
+                and runs it over the whole table. Column names are checked
+                against the schema registry and operators against a fixed
+                whitelist; user text only ever travels as a bound parameter.
+                The same compiler serves the baseline, so both sides of the
+                benchmark apply byte-identical predicate semantics.
+
+  complete      every engine that answers through select() examined every row
+                in scope, so Answer.complete is only ever set True on a path
+                that went through here.
 
   citations     survive extraction, so any row in an answer set can be traced
                 to the exact character span that justified it.
@@ -24,31 +31,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app.models import Citation, ExtractedContract
+from app.schema import BOOLEAN_FIELDS, COLUMNS, ddl
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS contracts (
-    contract_id             TEXT PRIMARY KEY,
-    source_path             TEXT,
-    vendor                  TEXT,
-    agreement_type          TEXT,
-    governing_law           TEXT,
-    effective_date          TEXT,
-    expiry_date             TEXT,
-    term_months             INTEGER,
-    auto_renew              INTEGER,
-    renewal_notice_days     INTEGER,
-    liability_cap_usd       INTEGER,
-    liability_cap_basis     TEXT,
-    late_penalty_usd        INTEGER,
-    termination_notice_days INTEGER,
-    insurance_required      INTEGER,
-    insurance_min_usd       INTEGER,
-    indemnification         INTEGER,
-    assignment_allowed      INTEGER,
-    confidentiality_years   INTEGER,
-    confidentiality_basis   TEXT,
-    amends_contract_id      TEXT
-);
+SCHEMA = ddl() + """
 
 CREATE TABLE IF NOT EXISTS citations (
     contract_id TEXT,
@@ -59,19 +44,75 @@ CREATE TABLE IF NOT EXISTS citations (
     PRIMARY KEY (contract_id, field)
 );
 
-CREATE INDEX IF NOT EXISTS idx_expiry   ON contracts(expiry_date);
-CREATE INDEX IF NOT EXISTS idx_law      ON contracts(governing_law);
-CREATE INDEX IF NOT EXISTS idx_parent   ON contracts(amends_contract_id);
+CREATE INDEX IF NOT EXISTS idx_expiry    ON contracts(expiry_date);
+CREATE INDEX IF NOT EXISTS idx_effective ON contracts(effective_date);
+CREATE INDEX IF NOT EXISTS idx_law       ON contracts(governing_law);
+CREATE INDEX IF NOT EXISTS idx_parent    ON contracts(amends_contract_id);
 """
 
-COLUMNS = [
-    "contract_id", "source_path", "vendor", "agreement_type", "governing_law",
-    "effective_date", "expiry_date", "term_months", "auto_renew", "renewal_notice_days",
-    "liability_cap_usd", "liability_cap_basis", "late_penalty_usd",
-    "termination_notice_days", "insurance_required", "insurance_min_usd",
-    "indemnification", "assignment_allowed", "confidentiality_years",
-    "confidentiality_basis", "amends_contract_id",
-]
+# A predicate is (column, operator, value).
+Predicate = tuple[str, str, Any]
+
+_CMP = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+_COLUMN_SET = set(COLUMNS)
+
+
+def compile_predicates(preds: Iterable[Predicate]) -> tuple[str, list[Any]]:
+    """Predicates -> (WHERE fragment, bound parameters).
+
+    Semantics are fixed here once, for every caller:
+      not_null on a boolean  means true  (NULL and 0 both excluded)
+      falsy                  means NULL or 0  (absence of a boolean)
+      eq on text             is case-insensitive
+      comparisons with NULL  are false
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    for col, op, value in preds:
+        if col not in _COLUMN_SET:
+            raise ValueError(f"unknown column {col!r}")
+        c = f'"{col}"'                       # safe: col is whitelisted above
+        if op in (None, "not_null"):
+            clauses.append(f"({c} IS NOT NULL AND {c} != 0)" if col in BOOLEAN_FIELDS
+                           else f"{c} IS NOT NULL")
+        elif op == "is_null":
+            clauses.append(f"{c} IS NULL")
+        elif op == "falsy":
+            clauses.append(f"({c} IS NULL OR {c} = 0)")
+        elif op == "eq":
+            if isinstance(value, bool):
+                clauses.append(f"COALESCE({c}, 0) = ?")
+                params.append(int(value))
+            elif isinstance(value, str):
+                clauses.append(f"LOWER({c}) = LOWER(?)")
+                params.append(value)
+            else:
+                clauses.append(f"{c} = ?")
+                params.append(value)
+        elif op == "ne":
+            clauses.append(f"({c} IS NULL OR {c} != ?)")
+            params.append(value)
+        elif op in _CMP:
+            clauses.append(f"{c} {_CMP[op]} ?")
+            params.append(value)
+        elif op == "between":
+            lo, hi = value
+            clauses.append(f"{c} BETWEEN ? AND ?")
+            params.extend([lo, hi])
+        elif op == "contains":
+            esc = str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append(f"LOWER({c}) LIKE LOWER(?) ESCAPE '\\'")
+            params.append(f"%{esc}%")
+        elif op == "in":
+            vals = list(value or [])
+            if not vals:
+                clauses.append("0")
+            else:
+                clauses.append(f"{c} IN ({','.join('?' * len(vals))})")
+                params.extend(vals)
+        else:
+            raise ValueError(f"unsupported operator {op!r}")
+    return (" AND ".join(clauses) or "1"), params
 
 
 class StructuredStore:
@@ -109,14 +150,31 @@ class StructuredStore:
         return self.conn.execute("SELECT COUNT(*) AS n FROM contracts").fetchone()["n"]
 
     def scan_all(self) -> list[dict[str, Any]]:
-        """Full corpus scan. The only honest basis for a count."""
-        return [dict(r) for r in self.conn.execute("SELECT * FROM contracts")]
+        """Every row. Used for determinacy checks and tests."""
+        return [dict(r) for r in self.conn.execute("SELECT * FROM contracts ORDER BY contract_id")]
 
-    def query(self, where: str = "", params: tuple = ()) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM contracts"
-        if where:
-            sql += f" WHERE {where}"
+    def select(self, preds: Iterable[Predicate] = (), limit: int | None = None) -> list[dict[str, Any]]:
+        """Rows matching every predicate, evaluated by SQLite over the full table."""
+        where, params = compile_predicates(preds)
+        sql = f"SELECT * FROM contracts WHERE {where} ORDER BY contract_id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = [*params, int(limit)]
         return [dict(r) for r in self.conn.execute(sql, params)]
+
+    def count_where(self, preds: Iterable[Predicate] = ()) -> int:
+        where, params = compile_predicates(preds)
+        return self.conn.execute(f"SELECT COUNT(*) AS n FROM contracts WHERE {where}", params).fetchone()["n"]
+
+    def sum_where(self, column: str, preds: Iterable[Predicate] = ()) -> tuple[float | None, int]:
+        """(SUM, number of non-null values) of a numeric column over matching rows."""
+        if column not in _COLUMN_SET:
+            raise ValueError(f"unknown column {column!r}")
+        where, params = compile_predicates(preds)
+        r = self.conn.execute(
+            f'SELECT SUM("{column}") AS s, COUNT("{column}") AS n FROM contracts WHERE {where}', params
+        ).fetchone()
+        return r["s"], r["n"]
 
     def get(self, contract_id: str) -> dict[str, Any] | None:
         r = self.conn.execute(
@@ -137,18 +195,15 @@ class StructuredStore:
         """Fraction of rows with a non-null value per field.
 
         Low coverage is the signal that extraction, not retrieval, is the thing
-        to fix -- and it is the number an absence engine must check before
-        trusting a null as a genuine absence rather than a extraction miss.
+        to fix. Column names come from the registry, never from a request.
         """
-        n = self.count() or 1
+        total = self.count()
         out: dict[str, float] = {}
         for c in COLUMNS:
             if c in ("contract_id", "source_path"):
                 continue
-            hit = self.conn.execute(
-                f"SELECT COUNT(*) AS k FROM contracts WHERE {c} IS NOT NULL"
-            ).fetchone()["k"]
-            out[c] = hit / n
+            nulls = self.count_where([(c, "is_null", None)])
+            out[c] = (total - nulls) / total if total else 0.0
         return out
 
     def close(self) -> None:

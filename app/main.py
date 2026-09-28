@@ -72,6 +72,9 @@ def health() -> dict[str, Any]:
         "chunks": st.chunks,
         "extractor": st.extractor,
         "embedding_backend": st.embedding_backend,
+        "router": st.router,
+        "llm_calls": st.llm_calls,
+        "llm_rejections": st.llm_rejections,
     }
 
 
@@ -82,12 +85,23 @@ def ask(req: AskRequest) -> dict[str, Any]:
     if not req.query.strip():
         raise HTTPException(400, "empty query")
 
-    plan = s.plan(req.query)
-    routed = s.ask(req.query)
+    plan = s.plan(req.query)            # routed once; both paths share the plan
+    routed = s.ask(req.query, plan)
     out: dict[str, Any] = {"plan": plan.to_dict(), "routed": routed.to_dict()}
     if req.compare:
-        out["baseline"] = s.ask_baseline(req.query).to_dict()
+        out["baseline"] = s.ask_baseline(req.query, plan).to_dict()
     return out
+
+
+@app.get("/api/schema")
+def schema() -> list[dict[str, Any]]:
+    """Every field the system can answer questions about, with its type and meaning."""
+    from app.schema import FIELDS, OPERATORS_BY_KIND
+    return [
+        {"field": f.name, "kind": f.kind, "description": f.description,
+         "values": list(f.values), "operators": sorted(OPERATORS_BY_KIND[f.kind])}
+        for f in FIELDS if f.synonyms
+    ]
 
 
 @app.get("/api/plan")
@@ -137,8 +151,14 @@ def examples() -> list[dict[str, str]]:
          "why": "The second hop consumes the first hop's output."},
         {"q": "List every contract governed by Delaware law", "cat": "completeness",
          "why": "Top-k cannot signal that its list is partial."},
+        {"q": "How many Texas contracts renew on their own?", "cat": "paraphrase",
+         "why": "No 'auto-renew' keyword, plus a scope filter. The plan bar shows how it was read."},
+        {"q": "What expires before June 2026?", "cat": "before/after",
+         "why": "A date comparison, not a date window. Vector space has no 'before'."},
         {"q": "What does the indemnification clause say?", "cat": "control",
          "why": "Retrieval is the right tool here. Both systems score the same."},
+        {"q": "What is the weather in Dallas?", "cat": "out of scope",
+         "why": "Nothing in the contracts answers this, so the routed system declines instead of guessing."},
     ]
 
 

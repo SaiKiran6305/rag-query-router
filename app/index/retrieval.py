@@ -25,6 +25,30 @@ import re
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import sparse
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+
+# Words that phrase a question but carry no content. Without these, "what does
+# the indemnification clause say" matched TERM clauses on "does" ("does not
+# renew automatically"), because "does" is rarer in the corpus than
+# "indemnification" and so outweighed it.
+QUERY_STOP_WORDS = frozenset(ENGLISH_STOP_WORDS | {
+    "does", "say", "says", "tell", "explain", "describe", "summarize", "summarise",
+    "clause", "clauses", "provision", "provisions", "section", "language",
+})
+
+_TOKEN = re.compile(r"[a-z0-9]+")
+
+
+def tokenize(text: str) -> list[str]:
+    """Lowercase alphanumeric tokens, stop words removed.
+
+    BM25 previously tokenized with str.split(), which kept punctuation: the
+    heading "5. INDEMNIFICATION." became the token "indemnification." and never
+    matched the query word "indemnification". The best indemnification chunk
+    ranked #1048 of 1793 lexically.
+    """
+    return [t for t in _TOKEN.findall(text.lower()) if t not in QUERY_STOP_WORDS]
 
 
 @dataclass
@@ -93,25 +117,24 @@ class EmbeddingBackend:
             from sklearn.feature_extraction.text import TfidfVectorizer
             self._vec = TfidfVectorizer(
                 lowercase=True, ngram_range=(1, 2), min_df=1, sublinear_tf=True,
-                stop_words="english",
+                stop_words=sorted(QUERY_STOP_WORDS),
             )
 
-    def fit(self, corpus: list[str]) -> np.ndarray:
+    def fit(self, corpus: list[str]):
+        """Chunk vectors, L2-normalised: a dense array, or a sparse matrix for TF-IDF.
+
+        TF-IDF stays sparse. It used to be densified here, which is harmless at
+        1.8k chunks and impossible at real scale: CUAD's 35,616 chunks x 771k
+        vocabulary would need 205 GB. TfidfVectorizer already L2-normalises rows.
+        """
         if self.kind == "sentence-transformers":
             return np.asarray(self._model.encode(corpus, normalize_embeddings=True))
-        m = self._vec.fit_transform(corpus)
-        return _l2(np.asarray(m.todense()))
+        return self._vec.fit_transform(corpus)
 
-    def encode(self, texts: list[str]) -> np.ndarray:
+    def encode(self, texts: list[str]):
         if self.kind == "sentence-transformers":
             return np.asarray(self._model.encode(texts, normalize_embeddings=True))
-        return _l2(np.asarray(self._vec.transform(texts).todense()))
-
-
-def _l2(a: np.ndarray) -> np.ndarray:
-    n = np.linalg.norm(a, axis=1, keepdims=True)
-    n[n == 0] = 1.0
-    return a / n
+        return self._vec.transform(texts)
 
 
 class HybridIndex:
@@ -126,7 +149,7 @@ class HybridIndex:
     def __init__(self, prefer: str | None = None):
         self.embed = EmbeddingBackend(prefer)
         self.chunks: list[Chunk] = []
-        self._matrix: np.ndarray | None = None
+        self._matrix = None                  # np.ndarray, or scipy sparse for TF-IDF
         self._bm25 = None
 
     def build(self, chunks: list[Chunk]) -> None:
@@ -135,22 +158,21 @@ class HybridIndex:
         self._matrix = self.embed.fit(texts)
         try:
             from rank_bm25 import BM25Okapi
-            self._bm25 = BM25Okapi([t.lower().split() for t in texts])
+            self._bm25 = BM25Okapi([tokenize(t) for t in texts])
         except Exception:
             self._bm25 = None
 
     def search(self, query: str, k: int = 8, use_hybrid: bool = True) -> list[tuple[Chunk, float]]:
         if self._matrix is None:
             raise RuntimeError("index not built")
-        qv = self.encode_query(query)
-        dense = (self._matrix @ qv.ravel())
+        dense = self._similarities(query)
         dense_order = np.argsort(-dense)
 
         if not (use_hybrid and self._bm25 is not None):
             idx = dense_order[:k]
             return [(self.chunks[i], float(dense[i])) for i in idx]
 
-        lex = np.asarray(self._bm25.get_scores(query.lower().split()))
+        lex = np.asarray(self._bm25.get_scores(tokenize(query)))
         lex_order = np.argsort(-lex)
 
         # Reciprocal rank fusion
@@ -163,5 +185,26 @@ class HybridIndex:
         top = sorted(rr.items(), key=lambda kv: -kv[1])[:k]
         return [(self.chunks[i], float(s)) for i, s in top]
 
-    def encode_query(self, query: str) -> np.ndarray:
+    def encode_query(self, query: str):
         return self.embed.encode([query])
+
+    def _similarities(self, query: str) -> np.ndarray:
+        """Cosine similarity of the query to every chunk (rows are L2-normalised)."""
+        qv = self.encode_query(query)
+        if sparse.issparse(self._matrix):
+            return np.asarray((self._matrix @ qv.T).todense()).ravel()
+        return self._matrix @ np.asarray(qv).ravel()
+
+    def relevance(self, query: str) -> float:
+        """Best raw similarity between the query and any chunk, in [0, 1].
+
+        This -- not the fused score -- is what an abstention gate must use.
+        Reciprocal rank fusion scores depend only on *rank*: the top hit gets
+        roughly 1/61 + 1/61 whether it is a perfect match or an unrelated clause
+        that happened to rank first, so "best biryani recipe" and "what does the
+        indemnification clause say" receive the same top fused score. Raw cosine
+        similarity still carries magnitude.
+        """
+        if self._matrix is None:
+            raise RuntimeError("index not built")
+        return float(np.max(self._similarities(query))) if len(self.chunks) else 0.0

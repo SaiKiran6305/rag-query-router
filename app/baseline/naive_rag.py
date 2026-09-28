@@ -12,7 +12,10 @@ Three concessions are made to it:
      alone. This is the strong 2026 pattern, not a naive one.
   3. Perfect reading comprehension over whatever it retrieved. Instead of
      asking an LLM to read the chunks, the baseline is handed the already
-     extracted structured facts for the contracts its chunks came from.
+     extracted structured facts for the contracts its chunks came from, and
+     applies the router's plan to them through the *same* SQL predicate
+     compiler the routed engines use -- so the two sides cannot disagree about
+     what a predicate means, only about which rows they looked at.
 
 Concession 3 is the important one. It means the baseline never makes a reading
 error, never hallucinates, and never misparses an amount. Every failure it
@@ -36,7 +39,6 @@ from app.index.retrieval import HybridIndex
 from app.index.structured import StructuredStore
 from app.models import Answer, AnswerItem, QueryType
 from app.router.classify import BOOLEAN_FIELDS, QueryPlan
-from app.engines.core import _matches
 
 DEFAULT_K = 8
 
@@ -57,22 +59,21 @@ class NaiveRAGBaseline:
         for chunk, _ in hits:
             if chunk.contract_id not in seen:
                 seen.append(chunk.contract_id)
-        rows = [r for r in (store.get(cid) for cid in seen) if r]
 
         f, op, v = plan.field, plan.operator, plan.value
 
         # The pipeline applies the question's predicate to its retrieved window.
         # This is what "the LLM reads the context and answers" amounts to when
         # the reading is perfect.
-        if plan.query_type == QueryType.ABSENCE:
-            if f in BOOLEAN_FIELDS:
-                matched = [r for r in rows if not r.get(f)]
-            else:
-                matched = [r for r in rows if r.get(f) is None]
-        elif f is not None and op is not None:
-            matched = [r for r in rows if _matches(r, f, op, v)]
-        else:
-            matched = rows
+        preds: list[tuple[str, str, Any]] = [("contract_id", "in", seen)]
+        preds += [(col, "eq", val) for col, val in (plan.filters or {}).items()]
+        if plan.query_type == QueryType.ABSENCE and f:
+            preds.append((f, "falsy" if f in BOOLEAN_FIELDS else "is_null", None))
+        elif plan.query_type != QueryType.SEMANTIC and f is not None and op is not None:
+            preds.append((f, op, v))
+
+        order = {cid: i for i, cid in enumerate(seen)}
+        matched = sorted(store.select(preds), key=lambda r: order[r["contract_id"]])
 
         if plan.aggregation == "count" or plan.query_type == QueryType.AGGREGATE:
             value: Any = len(matched)
@@ -90,9 +91,9 @@ class NaiveRAGBaseline:
             ],
             # Never complete: the window is a sample of the corpus by construction.
             complete=False,
-            scanned=len(rows),
+            scanned=len(seen),
             explanation=(
-                f"Retrieved top {self.k} chunks spanning {len(rows)} contracts out of "
+                f"Retrieved top {self.k} chunks spanning {len(seen)} contracts out of "
                 f"{store.count()} in the corpus, then applied the predicate to that window. "
                 f"Any count reported here is a count of the window, not of the corpus."
             ),

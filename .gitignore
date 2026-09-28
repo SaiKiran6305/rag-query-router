@@ -5,3 +5,5 @@ data/corpus/
 eval_report.json
 *.db
 .venv/
+data/cuad/
+eval_extraction*.json

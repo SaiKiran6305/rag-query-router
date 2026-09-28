@@ -43,6 +43,8 @@
   .badge{font:11px var(--mono);padding:3px 8px;border-radius:5px;text-transform:none;letter-spacing:0}
   .b-ok{background:rgba(63,191,127,.15);color:var(--good)}
   .b-no{background:rgba(226,87,76,.15);color:var(--bad)}
+  .b-dec{background:rgba(224,163,62,.15);color:var(--warn)}
+  .plan .note{color:var(--warn)}
   .body{padding:15px}
   .val{font-size:27px;font-weight:680;margin-bottom:3px}
   .val.small{font-size:16px;font-weight:600}
@@ -98,7 +100,7 @@ async function boot() {
   try {
     const h = await (await fetch('/api/health')).json();
     $('meta').textContent =
-      `${h.contracts} contracts · ${h.chunks} chunks · extractor=${h.extractor} · embeddings=${h.embedding_backend}`;
+      `${h.contracts} contracts · ${h.chunks} chunks · extractor=${h.extractor} · embeddings=${h.embedding_backend} · router=${h.router}`;
     EXAMPLES = await (await fetch('/api/examples')).json();
     $('chips').innerHTML = EXAMPLES
       .map((e,i) => `<div class="chip" data-i="${i}"><b>${e.cat}</b> · ${esc(e.q)}</div>`).join('');
@@ -125,13 +127,15 @@ function fmtVal(a) {
 function card(a, kind) {
   if (!a) return '';
   const [val, label] = fmtVal(a);
-  const complete = a.complete
-    ? '<span class="badge b-ok">complete scan</span>'
-    : '<span class="badge b-no">partial sample</span>';
+  const complete = a.abstained
+    ? '<span class="badge b-dec">declined</span>'
+    : a.complete
+      ? '<span class="badge b-ok">complete scan</span>'
+      : '<span class="badge b-no">partial sample</span>';
   const items = (a.items || []).slice(0, 40).map(i => `
     <div class="item">
       <span class="cid">${esc(i.contract_id)}</span> <span class="rsn">${esc(i.reason)}</span>
-      ${i.citation ? `<span class="cite">“${esc((i.citation.snippet||'').slice(0,150))}…” [${i.citation.start}:${i.citation.end}]</span>` : ''}
+      ${i.citation ? `<span class="cite">“${esc((i.citation.snippet||'').slice(0, a.engine === 'semantic' ? 320 : 150))}…” [${i.citation.start}:${i.citation.end}]</span>` : ''}
     </div>`).join('');
   const title = kind === 'routed' ? 'Routed system' : 'Naive RAG baseline';
   return `
@@ -164,12 +168,19 @@ async function ask() {
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const d = await r.json();
     const p = d.plan;
+    const filters = Object.entries(p.filters || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+    const notes = [...(p.assumptions || []).map(a => 'assumed: ' + a),
+                   ...((p.unresolved || []).length ? ['unresolved: ' + p.unresolved.join(', ')] : []),
+                   ...(p.abstain_reason ? ['declined: ' + p.abstain_reason] : [])];
     $('plan').innerHTML = `<div class="plan">
       routed as <span>${esc(p.query_type)}</span>
       · field <span>${esc(p.field ?? '—')}</span>
       · operator <span>${esc(p.operator ?? '—')}</span>
-      · value <span>${esc(JSON.stringify(p.value) ?? '—')}</span><br>
+      · value <span>${esc(JSON.stringify(p.value) ?? '—')}</span>
+      ${filters ? `· scope <span>${esc(filters)}</span>` : ''}
+      · router <span>${esc(p.tier)}</span> · confidence <span>${p.confidence}</span><br>
       signals: ${esc((p.signals||[]).join('  |  '))}
+      ${notes.length ? `<br><span class="note">${esc(notes.join('  |  '))}</span>` : ''}
     </div>`;
     $('out').innerHTML = `<div class="cols">${card(d.routed,'routed')}${card(d.baseline,'naive')}</div>`;
   } catch (e) {
