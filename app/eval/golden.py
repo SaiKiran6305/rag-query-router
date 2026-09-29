@@ -32,6 +32,7 @@ class GoldenQuery:
     answer_kind: str                   # "scalar" | "set" | "retrieval"
     note: str = ""
     tags: list[str] = field(default_factory=list)
+    clause: str | None = None          # retrieval queries: heading of the clause asked about
 
 
 def _q1_window(year: int) -> tuple[str, str]:
@@ -145,15 +146,16 @@ def build_golden_set(ground_truth_path: str | Path) -> list[GoldenQuery]:
     G.append(GoldenQuery(
         "What does the indemnification clause say?", QueryType.SEMANTIC,
         ids(lambda t: t["indemnification"]), "retrieval",
-        "Control: retrieval is the right tool for this. Scored on precision@k.", ["control"]))
+        "Control: retrieval is the right tool for this. Scored on precision@k.", ["control"],
+        clause="INDEMNIFICATION"))
     G.append(GoldenQuery(
         "Explain the confidentiality obligations", QueryType.SEMANTIC,
         ids(lambda t: t["confidentiality_years"] is not None), "retrieval",
-        tags=["control"]))
+        tags=["control"], clause="CONFIDENTIALITY"))
     G.append(GoldenQuery(
         "What are the termination provisions?", QueryType.SEMANTIC,
         ids(lambda t: t["termination_notice_days"] is not None), "retrieval",
-        tags=["control"]))
+        tags=["control"], clause="TERMINATION"))
 
     return G
 

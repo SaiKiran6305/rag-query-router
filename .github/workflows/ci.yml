@@ -15,8 +15,15 @@ jobs:
       # Regression gate. The build fails if routing accuracy on the structural
       # categories drops below 0.95 -- so a change that quietly degrades the
       # engines cannot merge while the README still claims 1.000.
+      # Robustness gate on the dev paraphrase split (regression protection).
+      # The held-out split is printed in the report but deliberately not gated.
       - name: eval gate
-        run: python -m app.eval.run_eval --corpus data/corpus --fail-under 0.95
+        run: >
+          python -m app.eval.run_eval --corpus data/corpus
+          --fail-under 0.95 --robustness-fail-under 0.95
+
+      - name: extraction accuracy
+        run: python -m app.eval.extraction_eval --synthetic data/corpus
 
       - uses: actions/upload-artifact@v4
         with: { name: eval-report, path: eval_report.json }

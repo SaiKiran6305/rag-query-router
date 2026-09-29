@@ -11,7 +11,8 @@ from app.index.retrieval import HybridIndex, chunk_contract
 from app.index.structured import StructuredStore
 from app.ingest.extract import Extractor, get_extractor
 from app.models import Answer
-from app.router.classify import QueryPlan, QueryRouter
+from app.router.classify import QueryPlan
+from app.router.llm import HybridRouter, build_router
 
 
 @dataclass
@@ -20,6 +21,9 @@ class SystemStats:
     chunks: int
     extractor: str
     embedding_backend: str
+    router: str
+    llm_calls: int
+    llm_rejections: int
 
 
 class ContractIntelligence:
@@ -27,11 +31,11 @@ class ContractIntelligence:
 
     def __init__(self, corpus_dir: str | Path, extractor: str = "deterministic",
                  db_path: str = ":memory:", build_index: bool = True,
-                 embeddings: str | None = None):
+                 embeddings: str | None = None, router: HybridRouter | None = None):
         self.corpus_dir = Path(corpus_dir)
         self.extractor: Extractor = get_extractor(extractor)
         self.store = StructuredStore(db_path)
-        self.router = QueryRouter()
+        self.router = router or build_router()
         self.index: HybridIndex | None = None
         self.baseline: NaiveRAGBaseline | None = None
         self._chunk_count = 0
@@ -55,20 +59,24 @@ class ContractIntelligence:
     def plan(self, query: str) -> QueryPlan:
         return self.router.route(query)
 
-    def ask(self, query: str) -> Answer:
+    def ask(self, query: str, plan: QueryPlan | None = None) -> Answer:
         """Routed path: classify, then dispatch to an engine that can answer."""
-        return dispatch(self.router.route(query), self.store, self.index)
+        return dispatch(plan or self.plan(query), self.store, self.index)
 
-    def ask_baseline(self, query: str) -> Answer:
-        """Naive path: same question, retrieve-then-read."""
+    def ask_baseline(self, query: str, plan: QueryPlan | None = None) -> Answer:
+        """Naive path: same question, same plan, retrieve-then-read."""
         if self.baseline is None or self.index is None:
             raise RuntimeError("index not built; construct with build_index=True")
-        return self.baseline.answer(self.router.route(query), self.store, self.index)
+        return self.baseline.answer(plan or self.plan(query), self.store, self.index)
 
     def stats(self) -> SystemStats:
+        planner = getattr(self.router, "planner", None)
         return SystemStats(
             contracts=self.store.count(),
             chunks=self._chunk_count,
             extractor=self.extractor.name,
             embedding_backend=self.index.embed.kind if self.index else "none",
+            router=getattr(self.router, "kind", "rules"),
+            llm_calls=planner.calls if planner else 0,
+            llm_rejections=planner.rejections if planner else 0,
         )

@@ -3,8 +3,9 @@ Synthetic contract corpus generator with exact, constructed ground truth.
 
 Why synthetic: the eval needs zero label noise. Every fact in the ground-truth
 record is one we placed, so "47 contracts have auto-renewal" is true by
-construction rather than by annotator agreement. A CUAD adapter lives in
-app/ingest/loader.py for swapping in real annotated contracts later.
+construction rather than by annotator agreement. For real contracts, the CUAD
+adapter in app/ingest/cuad.py exports CUAD's 510 expert-annotated contracts into
+the same corpus layout, and app/eval/extraction_eval.py scores against its labels.
 
 Design constraint that matters: the prose is generated with multiple phrasing
 variants per clause, amounts appear in mixed formats ($500,000 / $500K / five
